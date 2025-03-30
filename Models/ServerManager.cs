@@ -36,8 +36,8 @@ namespace combiningclient.Models
     }
     public class Settings
     {
-        public string BaseApiUrl { get; set; } = "http://localhost:5000";
-        public TimeSpan SyncTime { get; set; } = TimeSpan.FromHours(0).Add(TimeSpan.FromMinutes(1));
+        public string BaseApiUrl { get; set; } = "https://localhost:7064";
+        public TimeSpan SyncTime { get; set; } = TimeSpan.FromHours(0).Add(TimeSpan.FromMinutes(5));
         public List<string> DefaultCurrencies { get; set; } = new() { "USD", "EUR", "GBP" };
 
         public void Load()

@@ -1,17 +1,17 @@
-﻿using System.Collections.Generic;
-using System.Net.Http;
-using System.Security.Cryptography;
+﻿using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Linq;
-using Avalonia.Controls;
 using System;
 using Avalonia.Controls.Shapes;
 using ReactiveUI;
-using System.Windows.Input;
 using System.Reactive;
 using combiningclient.Models;
+using System.Net.Http.Json;
+using System.Text.Encodings.Web;
+using System.IO;
+
 
 namespace combiningclient.ViewModels
 {
@@ -73,10 +73,9 @@ namespace combiningclient.ViewModels
 
                 var request = new SyncRequest
                 {
-                    StartDate = StartDate,
-                    EndDate = EndDate,
-                    CurrencyCodes = currencies,
-                    BaseUrl = _settings.BaseApiUrl
+                    StartDate = StartDate.DateTime,  // Исправлено: DateTimeOffset → DateTime
+                    EndDate = EndDate.DateTime,
+                    CurrencyCodes = currencies
                 };
 
                 var content = new StringContent(
@@ -84,15 +83,21 @@ namespace combiningclient.ViewModels
                     Encoding.UTF8,
                     "application/json");
 
+                //var test = $"{_settings.BaseApiUrl}/api/exchangerates/sync";
                 var response = await _httpClient.PostAsync(
                     $"{_settings.BaseApiUrl}/api/exchangerates/sync",
                     content);
 
+                response.EnsureSuccessStatusCode();  // Генерирует исключение при ошибке HTTP
                 ReportResult = await response.Content.ReadAsStringAsync();
+            }
+            catch (HttpRequestException ex)
+            {
+                ReportResult = $"Ошибка сети: {ex.Message}";
             }
             catch (Exception ex)
             {
-                ReportResult = $"Ошибка синхронизации: {ex.Message}";
+                ReportResult = $"Ошибка: {ex.Message}";
             }
         }
 
@@ -100,51 +105,103 @@ namespace combiningclient.ViewModels
         {
             try
             {
-                var currencies = CurrencyCodes.Split(',')
-                    .Select(c => c.Trim())
+                // 1. Подготовка данных
+                var currencies = CurrencyCodes.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(c => c.Trim().ToUpper())
+                    .Distinct()
                     .ToList();
 
-                var request = new ReportRequest
+                if (!currencies.Any())
                 {
-                    StartDate = StartDate,
-                    EndDate = EndDate,
-                    CurrencyCodes = currencies,
-                    BaseUrl = _settings.BaseApiUrl
-                };
-
-                var content = new StringContent(
-                    JsonSerializer.Serialize(request),
-                    Encoding.UTF8,
-                    "application/json");
-
-                var response = await _httpClient.PostAsync(
-                    $"{_settings.BaseApiUrl}/api/exchangerates/report",
-                    content);
-
-                var result = await response.Content.ReadAsStringAsync();
-                var report = JsonSerializer.Deserialize<ReportResponse>(result);
-
-                var sb = new StringBuilder();
-                sb.AppendLine($"Отчет за период с {StartDate:d} по {EndDate:d}");
-                sb.AppendLine("====================================");
-
-                foreach (var currency in report.Reports)
-                {
-                    sb.AppendLine($"{currency.CurrencyCode}:");
-                    sb.AppendLine($"  Мин: {currency.MinRate:N2}");
-                    sb.AppendLine($"  Макс: {currency.MaxRate:N2}");
-                    sb.AppendLine($"  Средн: {currency.AvgRate:N2}");
-                    sb.AppendLine();
+                    ReportResult = "Ошибка: не указаны коды валют";
+                    return;
                 }
 
-                ReportResult = sb.ToString();
+                // 2. Формирование запроса
+                var request = new ReportRequest
+                {
+                    StartDate = StartDate.Date,
+                    EndDate = EndDate.Date,
+                    CurrencyCodes = currencies
+                };
+
+                // 3. Запрос данных с сервера
+                var response = await _httpClient.PostAsJsonAsync(
+                    $"{_settings.BaseApiUrl}/api/exchangerates/report",
+                    request);
+
+                response.EnsureSuccessStatusCode();
+                var reportData = await response.Content.ReadFromJsonAsync<ReportResponse>();
+
+                // 4. Нормализация курсов (для Amount = 1)
+                var normalizedData = reportData?.Reports?
+                    .Select(r => new
+                    {
+                        Валюта = r.CurrencyCode,
+                        МинимальныйКурс = r.MinRate,
+                        МаксимальныйКурс = r.MaxRate,
+                        СреднийКурс = r.AvgRate
+      
+                    })
+                    .ToList();
+
+                // 5. Формирование JSON
+                var jsonReport = new
+                {
+                    Метаданные = new
+                    {
+                        Сгенерирован = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                        Период = $"{StartDate:yyyy-MM-dd} - {EndDate:yyyy-MM-dd}",
+                        Валюты = currencies
+                    },
+                    Данные = normalizedData
+                };
+
+                // 6. Сохранение в файл
+                var fileName = $"Отчет_Курсы_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+                var downloadsPath = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                    fileName);
+
+                await File.WriteAllTextAsync(
+                    downloadsPath,
+                    JsonSerializer.Serialize(jsonReport, new JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                    }));
+
+                // 7. Формирование текста для TextBox
+                var reportText = new StringBuilder();
+                reportText.AppendLine($"ОТЧЕТ О КУРСАХ ВАЛЮТ");
+                reportText.AppendLine($"Период: {StartDate:dd.MM.yyyy} - {EndDate:dd.MM.yyyy}");
+                reportText.AppendLine($"Сформирован: {DateTime.Now:dd.MM.yyyy HH:mm}");
+                reportText.AppendLine(new string('=', 50));
+
+                if (normalizedData?.Any() == true)
+                {
+                    foreach (var currency in normalizedData)
+                    {
+                        reportText.AppendLine($"{currency.Валюта}:");
+                        reportText.AppendLine($"  Мин: {currency.МинимальныйКурс:N4}");
+                        reportText.AppendLine($"  Макс: {currency.МаксимальныйКурс:N4}");
+                        reportText.AppendLine($"  Средн: {currency.СреднийКурс:N4}");
+                        reportText.AppendLine();
+                    }
+                    reportText.AppendLine($"Файл отчёта сохранён: {downloadsPath}");
+                }
+                else
+                {
+                    reportText.AppendLine("Нет данных за указанный период");
+                }
+
+                ReportResult = reportText.ToString();
             }
             catch (Exception ex)
             {
-                ReportResult = $"Ошибка получения отчета: {ex.Message}";
+                ReportResult = $"Ошибка при формировании отчёта: {ex.Message}";
             }
         }
-
         private void OpenSettings()
         {
             var settingsWindow = new SettingsWindow
